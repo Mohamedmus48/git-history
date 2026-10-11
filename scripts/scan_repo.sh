@@ -90,11 +90,40 @@ else
 fi
 
 # --- 6. Normalize findings into one JSON array for this repo ---------------
-python3 - "$REPO_FULL_NAME" "$WORK_DIR/raw_findings.jsonl" "$RESULT_FILE" <<'PYEOF'
-import json, sys
+# Each finding is tagged with where it was found:
+#   current_file     - still present in the latest tracked snapshot (HEAD) --
+#                       i.e. it's live in the repo today, not something that
+#                       was deleted and only recoverable via history.
+#   restored_deleted  - only recovered by restoring a file git rm'd earlier.
+#   dangling_blob     - only recovered from an unreachable/dangling git object.
+#   git_internal      - found inside .git/ itself (e.g. an unpacked loose
+#                       object) rather than under our own restore folders.
+python3 - "$REPO_FULL_NAME" "$WORK_DIR/raw_findings.jsonl" "$RESULT_FILE" "$WORK_DIR/repo" <<'PYEOF'
+import json, sys, subprocess, os
 
-repo, raw_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+repo, raw_path, out_path, repo_dir = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 findings = []
+
+def classify(abs_path: str) -> str:
+    rel = os.path.relpath(abs_path, repo_dir)
+    if rel.startswith("__restored_deleted" + os.sep) or rel == "__restored_deleted":
+        return "restored_deleted"
+    if rel.startswith("__dangling_blobs" + os.sep) or rel == "__dangling_blobs":
+        return "dangling_blob"
+    if rel.startswith(".git" + os.sep) or rel == ".git":
+        return "git_internal"
+    return "current_file"
+
+def is_tracked_at_head(abs_path: str) -> bool:
+    rel = os.path.relpath(abs_path, repo_dir)
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo_dir, "ls-files", "--error-unmatch", "--", rel],
+            capture_output=True, text=True, timeout=10,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
 
 try:
     with open(raw_path, "r") as f:
@@ -106,12 +135,22 @@ try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            abs_file = (obj.get("SourceMetadata", {})
+                           .get("Data", {})
+                           .get("Filesystem", {})
+                           .get("file", "unknown"))
+            source = classify(abs_file) if abs_file != "unknown" else "unknown"
+            rel_file = os.path.relpath(abs_file, repo_dir) if abs_file != "unknown" else "unknown"
             findings.append({
                 "detector": obj.get("DetectorName", "unknown"),
-                "file": (obj.get("SourceMetadata", {})
-                            .get("Data", {})
-                            .get("Filesystem", {})
-                            .get("file", "unknown")),
+                "file": rel_file,
+                "source": source,
+                # True only when the secret is in a file currently tracked
+                # on HEAD (i.e. still live in the repo today, not just
+                # recovered from deleted/dangling history) -- a strong
+                # signal it's a known/intentional fixture rather than a
+                # leak someone tried to scrub.
+                "currently_live_on_head": is_tracked_at_head(abs_file) if source == "current_file" else False,
                 "verified": obj.get("Verified", False),
                 "raw_snippet_redacted": "***redacted***",
             })
