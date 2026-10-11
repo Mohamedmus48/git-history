@@ -6,12 +6,16 @@
 set -uo pipefail
 
 REPO_FULL_NAME="${1:?usage: scan_repo.sh <owner/repo> <output-dir>}"
-OUT_DIR="${2:?usage: scan_repo.sh <owner/repo> <output-dir>}"
+OUT_DIR_RAW="${2:?usage: scan_repo.sh <owner/repo> <output-dir>}"
 REPO_SAFE_NAME=$(echo "$REPO_FULL_NAME" | tr '/' '_')
 WORK_DIR=$(mktemp -d)
-RESULT_FILE="$OUT_DIR/${REPO_SAFE_NAME}.json"
 
-mkdir -p "$OUT_DIR"
+# Resolve OUT_DIR to an ABSOLUTE path now, before we `cd` into the cloned
+# repo below — a relative path like "results" would otherwise be looked up
+# relative to the clone's directory later and silently fail to be found.
+mkdir -p "$OUT_DIR_RAW"
+OUT_DIR=$(cd "$OUT_DIR_RAW" && pwd)
+RESULT_FILE="$OUT_DIR/${REPO_SAFE_NAME}.json"
 echo "::group::📦 $REPO_FULL_NAME"
 
 cleanup() {
