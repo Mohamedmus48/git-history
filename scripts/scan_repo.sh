@@ -31,14 +31,34 @@ fi
 cd "$WORK_DIR/repo"
 
 # --- 2. Restore deleted files from commit history (parent/child diff) -------
+# Preserve the original directory structure (under a per-commit folder)
+# instead of flattening the path into one filename — a flattened name from
+# a deeply nested repo (e.g. Unity asset trees) can exceed the 255-byte
+# filename limit and fail with "File name too long". We still guard against
+# that per-component limit by hashing any path that's still too long.
 mkdir -p __restored_deleted
 git rev-list --all 2>/dev/null | while read -r commit; do
     parent=$(git log --pretty=format:"%P" -n 1 "$commit" 2>/dev/null | awk '{print $1}')
     [[ -z "$parent" ]] && continue
-    git diff --name-status "$parent" "$commit" 2>/dev/null | while read -r status file; do
+    short_commit="${commit:0:12}"
+    git diff --name-status "$parent" "$commit" 2>/dev/null | while IFS=$'\t' read -r status file; do
         [[ "$status" != "D" ]] && continue
-        safe_name=$(echo "$file" | tr '/' '_')
-        git show "${parent}:${file}" > "__restored_deleted/${commit:0:12}___${safe_name}" 2>/dev/null
+        [[ -z "$file" ]] && continue
+
+        dest="__restored_deleted/${short_commit}/${file}"
+
+        # Fall back to a hashed filename if the destination path (or any
+        # single component of it) would be too long for the filesystem.
+        if [[ ${#dest} -gt 240 ]] || [[ -n $(echo "$file" | awk -F'/' '{for(i=1;i<=NF;i++) if(length($i)>240) print "x"}') ]]; then
+            hash=$(echo -n "$file" | sha1sum | cut -d' ' -f1)
+            ext="${file##*.}"
+            [[ "$ext" == "$file" ]] && ext="bin"
+            dest="__restored_deleted/${short_commit}/_long_${hash}.${ext}"
+            echo "${dest} <= ${file}" >> __restored_deleted/_long_paths.log
+        fi
+
+        mkdir -p "$(dirname "$dest")" 2>/dev/null
+        git show "${parent}:${file}" > "$dest" 2>/dev/null
     done
 done
 
